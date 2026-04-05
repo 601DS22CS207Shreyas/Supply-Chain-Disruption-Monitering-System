@@ -2,16 +2,21 @@ package com.supplychain.service;
 
 import com.supplychain.dto.request.CreateShipmentRequest;
 import com.supplychain.dto.request.UpdateShipmentStatusRequest;
+import com.supplychain.dto.response.AlertResponse;
+import com.supplychain.dto.response.RiskPredictionResponse;
 import com.supplychain.dto.response.ShipmentDetailResponse;
 import com.supplychain.dto.response.ShipmentResponse;
 import com.supplychain.enums.ShipmentStatus;
 import com.supplychain.exception.ResourceNotFoundException;
+import com.supplychain.model.Alert;
 import com.supplychain.model.RiskPrediction;
 import com.supplychain.model.Shipment;
 import com.supplychain.model.ShipmentRoute;
+import com.supplychain.repository.AlertRepository;
 import com.supplychain.repository.RiskPredictionRepository;
 import com.supplychain.repository.ShipmentRepository;
 import com.supplychain.repository.ShipmentRouteRepository;
+import com.supplychain.service.ShipmentService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.domain.Page;
@@ -27,13 +32,15 @@ import java.util.stream.Collectors;
 @Service
 @RequiredArgsConstructor
 @Slf4j
-public class ShipmentServiceImpl implements ShipmentService{
+public class ShipmentServiceImpl implements ShipmentService {
 
     private final ShipmentRepository shipmentRepository;
     private final ShipmentRouteRepository routeRepository;
     private final RiskPredictionRepository riskPredictionRepository;
+    private final AlertRepository alertRepository;  // ← added
 
     // ── Create ────────────────────────────────────────────────────────────────
+    @Override
     @Transactional
     public ShipmentResponse createShipment(CreateShipmentRequest req) {
         String trackingNumber = generateTrackingNumber();
@@ -58,7 +65,6 @@ public class ShipmentServiceImpl implements ShipmentService{
 
         shipment = shipmentRepository.save(shipment);
 
-        // Save waypoints if provided
         if (req.getWaypoints() != null && !req.getWaypoints().isEmpty()) {
             Shipment finalShipment = shipment;
             List<ShipmentRoute> waypoints = req.getWaypoints().stream()
@@ -80,6 +86,7 @@ public class ShipmentServiceImpl implements ShipmentService{
     }
 
     // ── Read: List ────────────────────────────────────────────────────────────
+    @Override
     public Page<ShipmentResponse> getShipments(String search, ShipmentStatus status, Pageable pageable) {
         Page<Shipment> page;
 
@@ -99,23 +106,29 @@ public class ShipmentServiceImpl implements ShipmentService{
     }
 
     // ── Read: Detail ──────────────────────────────────────────────────────────
+    @Override
     public ShipmentDetailResponse getShipmentDetail(Long id) {
         Shipment shipment = shipmentRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Shipment not found with id: " + id));
 
         List<ShipmentRoute> routes = routeRepository.findByShipmentIdOrderByWaypointOrder(id);
+
         Optional<RiskPrediction> prediction =
                 riskPredictionRepository.findTopByShipmentIdOrderByPredictedAtDesc(id);
 
-        return mapToDetailResponse(shipment, routes, prediction.orElse(null));
+        List<Alert> alerts = alertRepository.findByShipmentIdOrderByCreatedAtDesc(id);
+
+        return mapToDetailResponse(shipment, routes, prediction.orElse(null), alerts);
     }
 
+    @Override
     public Shipment getShipmentById(Long id) {
         return shipmentRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Shipment not found with id: " + id));
     }
 
     // ── Update Status ─────────────────────────────────────────────────────────
+    @Override
     @Transactional
     public ShipmentResponse updateStatus(Long id, UpdateShipmentStatusRequest req) {
         Shipment shipment = getShipmentById(id);
@@ -128,6 +141,7 @@ public class ShipmentServiceImpl implements ShipmentService{
     }
 
     // ── Delete ────────────────────────────────────────────────────────────────
+    @Override
     @Transactional
     public void deleteShipment(Long id) {
         if (!shipmentRepository.existsById(id)) {
@@ -138,6 +152,7 @@ public class ShipmentServiceImpl implements ShipmentService{
     }
 
     // ── Active shipments for batch prediction ─────────────────────────────────
+    @Override
     public List<Shipment> getActiveShipments() {
         return shipmentRepository.findByStatusIn(
                 List.of(ShipmentStatus.PENDING, ShipmentStatus.IN_TRANSIT, ShipmentStatus.AT_WAREHOUSE)
@@ -177,7 +192,14 @@ public class ShipmentServiceImpl implements ShipmentService{
                 .build();
     }
 
-    private ShipmentDetailResponse mapToDetailResponse(Shipment s, List<ShipmentRoute> routes, RiskPrediction rp) {
+    // ── Updated: now takes alerts and builds full detail response ─────────────
+    private ShipmentDetailResponse mapToDetailResponse(
+            Shipment s,
+            List<ShipmentRoute> routes,
+            RiskPrediction rp,
+            List<Alert> alerts) {
+
+        // Map waypoints
         List<ShipmentDetailResponse.WaypointResponse> waypointResponses = routes.stream()
                 .map(r -> ShipmentDetailResponse.WaypointResponse.builder()
                         .waypointOrder(r.getWaypointOrder())
@@ -187,6 +209,38 @@ public class ShipmentServiceImpl implements ShipmentService{
                         .lng(r.getLng())
                         .estimatedArrival(r.getEstimatedArrival())
                         .actualArrival(r.getActualArrival())
+                        .build())
+                .collect(Collectors.toList());
+
+        // Map prediction
+        RiskPredictionResponse predictionResponse = null;
+        if (rp != null) {
+            predictionResponse = RiskPredictionResponse.builder()
+                    .id(rp.getId())
+                    .shipmentId(s.getId())
+                    .trackingNumber(s.getTrackingNumber())
+                    .delayProbability(rp.getDelayProbability())
+                    .riskLevel(computeRiskLevel(rp.getDelayProbability()))
+                    .estimatedDelayHours(rp.getEstimatedDelayHours())
+                    .primaryCause(rp.getPrimaryCause())
+                    .llmExplanation(rp.getLlmExplanation())
+                    .modelVersion(rp.getModelVersion())
+                    .predictedAt(rp.getPredictedAt())
+                    .build();
+        }
+
+        // Map alerts (latest 3 only)
+        List<AlertResponse> alertResponses = alerts.stream()
+                .limit(3)
+                .map(a -> AlertResponse.builder()
+                        .id(a.getId())
+                        .shipmentId(s.getId())
+                        .trackingNumber(s.getTrackingNumber())
+                        .alertType(a.getAlertType())
+                        .message(a.getMessage())
+                        .severity(a.getSeverity())
+                        .isRead(a.getIsRead())
+                        .createdAt(a.getCreatedAt())
                         .build())
                 .collect(Collectors.toList());
 
@@ -210,7 +264,8 @@ public class ShipmentServiceImpl implements ShipmentService{
                 .destinationLat(s.getDestinationLat())
                 .destinationLng(s.getDestinationLng())
                 .waypoints(waypointResponses)
+                .latestPrediction(predictionResponse)   // ← now populated
+                .recentAlerts(alertResponses)            // ← now populated
                 .build();
     }
 }
-
