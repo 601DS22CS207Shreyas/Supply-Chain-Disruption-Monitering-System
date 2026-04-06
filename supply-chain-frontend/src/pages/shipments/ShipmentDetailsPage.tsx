@@ -173,7 +173,9 @@ export default function ShipmentDetailPage() {
           </button>
           <button
             onClick={handlePredict}
-            disabled={isPredicting}
+            disabled={isPredicting ||
+    shipment.status === 'DELIVERED' ||
+    shipment.status === 'CANCELLED'}
             className="flex items-center gap-2 text-sm bg-blue-600 text-white rounded-lg px-4 py-2 hover:bg-blue-700 transition disabled:opacity-60"
           >
             {isPredicting
@@ -392,14 +394,21 @@ export default function ShipmentDetailPage() {
                   </div>
                 )}
               </div>
-            ) : (
-              <div className="flex flex-col items-center justify-center py-8 gap-3">
-                <Clock size={32} className="text-gray-300" />
-                <p className="text-sm text-gray-400 text-center">
-                  No prediction yet. Click "Run Prediction" to analyse this shipment.
-                </p>
-              </div>
-            )}
+            ) : shipment.status === 'DELIVERED' ? (
+  <div className="flex flex-col items-center justify-center py-8 gap-3">
+    <CheckCircle size={32} className="text-green-400" />
+    <p className="text-sm text-gray-400 text-center">
+      Shipment delivered successfully. No risk prediction needed.
+    </p>
+  </div>
+) : (
+  <div className="flex flex-col items-center justify-center py-8 gap-3">
+    <Clock size={32} className="text-gray-300" />
+    <p className="text-sm text-gray-400 text-center">
+      No prediction yet. Click "Run Prediction" to analyse this shipment.
+    </p>
+  </div>
+)}
           </div>
         </div>
       </div>

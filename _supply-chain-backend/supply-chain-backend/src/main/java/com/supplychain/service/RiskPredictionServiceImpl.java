@@ -3,6 +3,7 @@ package com.supplychain.service;
 import com.supplychain.client.MLServiceClient;
 import com.supplychain.dto.response.RiskPredictionResponse;
 import com.supplychain.enums.AlertType;
+import com.supplychain.enums.ShipmentStatus;
 import com.supplychain.exception.ResourceNotFoundException;
 import com.supplychain.model.*;
 import com.supplychain.repository.*;
@@ -27,12 +28,20 @@ public class RiskPredictionServiceImpl implements RiskPredictionService {
     private final MLServiceClient mlServiceClient;
     private final AlertService alertService;
 
+
+
     // ── Predict for a single shipment ─────────────────────────────────────────
     @Transactional
     public RiskPredictionResponse predictForShipment(Long shipmentId) {
         Shipment shipment = shipmentRepository.findById(shipmentId)
                 .orElseThrow(() -> new ResourceNotFoundException("Shipment not found: " + shipmentId));
 
+        if (shipment.getStatus() == ShipmentStatus.DELIVERED ||
+                shipment.getStatus() == ShipmentStatus.CANCELLED) {
+            throw new IllegalArgumentException(
+                    "Cannot predict risk for a " + shipment.getStatus() + " shipment."
+            );
+        }
         // Find nearby active events for this shipment
         List<DisruptionEvent> nearbyEvents = findNearbyEvents(shipment);
 
